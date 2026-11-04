@@ -96,11 +96,13 @@ jobs:
           PROFILE_NAME: ${{ steps.install.outputs.profile_name }}
           KEYCHAIN: ${{ steps.install.outputs.keychain }}
           AKIS_CARPLAY: ${{ steps.install.outputs.carplay }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
         run: |
           set -o pipefail
-          # Above every build TrafficApp's own ios.yml has made (run number × 10 + attempt, 251 so far): App Store
-          # Connect wants each upload's build number higher than the last.
-          build_number=$(( 10000 + GITHUB_RUN_NUMBER * 10 + GITHUB_RUN_ATTEMPT ))
+          # One above this MARKETING_VERSION's highest build in App Store Connect (ios/scripts/next-build-number.mjs).
+          build_number=$(node scripts/next-build-number.mjs)
           xcodebuild archive -quiet -project Akis.xcodeproj -scheme Akis -configuration Release \
             -destination generic/platform=iOS -archivePath "$RUNNER_TEMP/Akis.xcarchive" \
             CURRENT_PROJECT_VERSION="$build_number" AKIS_API_URL="$AKIS_API_URL" TOMTOM_API_KEY= \
