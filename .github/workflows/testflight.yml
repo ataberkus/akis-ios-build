@@ -1,0 +1,144 @@
+# Builds the Akış iOS app from the private ataberkus/TrafficApp (read-only deploy key) on a free public-repo macOS
+# runner and uploads it to TestFlight (internal testing). This repo holds no app source; everything here is public,
+# so the steps print no source, upload no artifacts, and keep xcodebuild quiet. Mirror of TrafficApp's ios.yml
+# signing/upload steps: change them there first.
+#   gh workflow run testflight.yml -R ataberkus/akis-ios-build -f ref=<branch or commit of TrafficApp>
+name: TestFlight
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: TrafficApp branch, tag or commit to build
+        required: true
+        default: master
+
+concurrency:
+  group: testflight
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  testflight:
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      XCODEGEN_VERSION: 2.46.0
+      XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+      AKIS_API_URL: https://2.31.13.235:7443
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ataberkus/TrafficApp
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.TRAFFICAPP_DEPLOY_KEY }}
+          persist-credentials: false
+
+      - name: Commit
+        run: git log -1 --format='%h %s'
+
+      - name: Install XcodeGen
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/xcodegen.zip" "https://github.com/yonaskolb/XcodeGen/releases/download/$XCODEGEN_VERSION/xcodegen.zip"
+          echo "$XCODEGEN_SHA256  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP/xcodegen"
+          echo "$RUNNER_TEMP/xcodegen/xcodegen/bin" >> "$GITHUB_PATH"
+
+      - name: Generate the Xcode project
+        working-directory: ios
+        run: xcodegen generate --quiet
+
+      - name: Test AkisCore
+        run: swift test --quiet --package-path ios/AkisCore 2>&1 | tail -3
+
+      - name: Install the signing certificate and profile
+        id: install
+        env:
+          IOS_DIST_CERT_P12: ${{ secrets.IOS_DIST_CERT_P12 }}
+          IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
+          IOS_PROVISIONING_PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password="$(openssl rand -hex 24)"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          printf '%s' "$IOS_DIST_CERT_P12" | base64 --decode > "$RUNNER_TEMP/dist.p12"
+          security import "$RUNNER_TEMP/dist.p12" -k "$keychain" -P "$IOS_DIST_CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security > /dev/null
+          rm "$RUNNER_TEMP/dist.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+
+          profile="$RUNNER_TEMP/akis.mobileprovision"
+          printf '%s' "$IOS_PROVISIONING_PROFILE" | base64 --decode > "$profile"
+          security cms -D -i "$profile" > "$RUNNER_TEMP/profile.plist"
+          uuid="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$RUNNER_TEMP/profile.plist")"
+          name="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$RUNNER_TEMP/profile.plist")"
+          for dir in "$HOME/Library/MobileDevice/Provisioning Profiles" "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"; do
+            mkdir -p "$dir"
+            cp "$profile" "$dir/$uuid.mobileprovision"
+          done
+          echo "keychain=$keychain" >> "$GITHUB_OUTPUT"
+          echo "profile_name=$name" >> "$GITHUB_OUTPUT"
+          if [ "$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.carplay-maps' "$RUNNER_TEMP/profile.plist" 2> /dev/null)" = "true" ]; then
+            echo "carplay=YES" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::The provisioning profile has no CarPlay navigation entitlement: archiving without CarPlay."
+            echo "carplay=NO" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Archive
+        working-directory: ios
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          PROFILE_NAME: ${{ steps.install.outputs.profile_name }}
+          KEYCHAIN: ${{ steps.install.outputs.keychain }}
+          AKIS_CARPLAY: ${{ steps.install.outputs.carplay }}
+        run: |
+          set -o pipefail
+          # Above every build TrafficApp's own ios.yml has made (run number × 10 + attempt, 251 so far): App Store
+          # Connect wants each upload's build number higher than the last.
+          build_number=$(( 10000 + GITHUB_RUN_NUMBER * 10 + GITHUB_RUN_ATTEMPT ))
+          xcodebuild archive -quiet -project Akis.xcodeproj -scheme Akis -configuration Release \
+            -destination generic/platform=iOS -archivePath "$RUNNER_TEMP/Akis.xcarchive" \
+            CURRENT_PROJECT_VERSION="$build_number" AKIS_API_URL="$AKIS_API_URL" TOMTOM_API_KEY= \
+            AKIS_TEAM_ID="$APPLE_TEAM_ID" AKIS_PROFILE_NAME="$PROFILE_NAME" AKIS_CARPLAY="$AKIS_CARPLAY" \
+            OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN"
+          echo "Archived build $build_number"
+
+      - name: Upload to TestFlight
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          PROFILE_NAME: ${{ steps.install.outputs.profile_name }}
+        run: |
+          key="$RUNNER_TEMP/AuthKey_$ASC_KEY_ID.p8"
+          printf '%s\n' "$ASC_KEY_P8" > "$key"
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>teamID</key><string>$APPLE_TEAM_ID</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>signingCertificate</key><string>Apple Distribution</string>
+            <key>provisioningProfiles</key>
+            <dict><key>com.akis.navigation</key><string>$PROFILE_NAME</string></dict>
+            <key>testFlightInternalTestingOnly</key><true/>
+            -authenticationKeyPath "$key" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+          rm "$key"
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" -exportPath "$RUNNER_TEMP/export" \
+            -authenticationKeyPath "$key" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID" 2>&1 \
+            | grep -E "EXPORT|Upload|error|rror:" || true
+          rm "$key"
+          test -n "$(ls "$RUNNER_TEMP/export" 2>/dev/null)" || { echo "export/upload produced nothing"; exit 1; }
+
+      - name: Remove the signing keychain
+        if: always() && steps.install.outputs.keychain != ''
+        run: security delete-keychain "${{ steps.install.outputs.keychain }}"
