@@ -131,13 +131,14 @@ jobs:
             <key>provisioningProfiles</key>
             <dict><key>com.akis.navigation</key><string>$PROFILE_NAME</string></dict>
             <key>testFlightInternalTestingOnly</key><true/>
+            <key>uploadSymbols</key><true/>
+          </dict>
+          </plist>
+          EOF
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/Akis.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" -exportPath "$RUNNER_TEMP/export" \
             -authenticationKeyPath "$key" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID"
           rm "$key"
-            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" -exportPath "$RUNNER_TEMP/export" \
-            -authenticationKeyPath "$key" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID" 2>&1 \
-            | grep -E "EXPORT|Upload|error|rror:" || true
-          rm "$key"
-          test -n "$(ls "$RUNNER_TEMP/export" 2>/dev/null)" || { echo "export/upload produced nothing"; exit 1; }
 
       - name: Remove the signing keychain
         if: always() && steps.install.outputs.keychain != ''
