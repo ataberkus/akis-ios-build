@@ -1,6 +1,7 @@
-# Runs the Akış UI tests from the private ataberkus/TrafficApp (read-only deploy key) on the simulator, in light and
-# dark appearance, and keeps their screenshots for design review. This repo is public: the steps print no source, and
-# the screenshots are uploaded only encrypted (AES-256, key in the SHOTS_KEY secret) for one day.
+# Tests the Akış iOS app from the private ataberkus/TrafficApp (read-only deploy key) on the simulator: AkisCore and
+# the app's unit tests, then the UI tests in light and dark appearance, keeping their screenshots for design review.
+# This repo is public: the log shows only test names and results; the screenshots, test logs and failure messages are
+# uploaded only encrypted (AES-256, key in the SHOTS_KEY secret) for one day.
 #   gh workflow run ui-shots.yml -R ataberkus/akis-ios-build -f ref=<branch or full commit of TrafficApp>
 #   openssl enc -d -aes-256-cbc -pbkdf2 -in shots.enc -out shots.zip -pass file:<key file>
 name: UI screenshots
@@ -13,9 +14,12 @@ on:
         required: true
         default: master
       tests:
-        description: Space-separated -only-testing targets
+        description: Space-separated -only-testing UI test targets
         required: true
-        default: AkisUITests/NavigationUITests/testPreviewStartDriveMoveMapRecentreAndEnd AkisUITests/MapUITests/testForecastHorizonsAndRoadInfo
+        default: >-
+          AkisUITests/NavigationUITests/testPreviewStartDriveMoveMapRecentreAndEnd
+          AkisUITests/MapUITests/testNowTrafficAndRoadInfo
+          AkisUITests/MapUITests/testOnboardingAndSettings
 
 concurrency:
   group: ui-shots
@@ -27,7 +31,7 @@ permissions:
 jobs:
   shots:
     runs-on: macos-26
-    timeout-minutes: 60
+    timeout-minutes: 75
     env:
       XCODEGEN_VERSION: 2.46.0
       XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
@@ -71,16 +75,43 @@ jobs:
           xcrun simctl bootstatus "$udid" -b > /dev/null
           echo "SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
           echo "SIMULATOR=platform=iOS Simulator,id=$udid" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/shots"
 
       - name: Build for testing
         working-directory: ios
         run: |
           set -o pipefail
           xcodebuild build-for-testing -quiet -project Akis.xcodeproj -scheme Akis -destination "$SIMULATOR" \
-            -derivedDataPath "$RUNNER_TEMP/dd" AKIS_API_URL="$AKIS_API_URL" 2>&1 | grep -E "error:|BUILD" || true
-          [ -d "$RUNNER_TEMP/dd/Build/Products/Debug-iphonesimulator/Akis.app" ]
+            -derivedDataPath "$RUNNER_TEMP/dd" AKIS_API_URL="$AKIS_API_URL" > "$RUNNER_TEMP/shots/build.log" 2>&1 \
+            || { echo "build failed (log in the encrypted artifact)"; exit 1; }
 
-      - name: Test in light and dark appearance
+      - name: Unit tests
+        id: unit
+        continue-on-error: true
+        working-directory: ios
+        run: |
+          status=0
+          if swift test --package-path AkisCore > "$RUNNER_TEMP/shots/akiscore-tests.log" 2>&1; then
+            echo "AkisCore: passed"
+          else
+            echo "AkisCore: failed"; status=1
+          fi
+          bundle="$RUNNER_TEMP/unit.xcresult"
+          xcodebuild test-without-building -quiet -project Akis.xcodeproj -scheme Akis -destination "$SIMULATOR" \
+            -derivedDataPath "$RUNNER_TEMP/dd" -resultBundlePath "$bundle" -only-testing:AkisTests \
+            > "$RUNNER_TEMP/shots/app-unit-tests.log" 2>&1 || status=1
+          if [ -d "$bundle" ]; then
+            xcrun xcresulttool get test-results tests --path "$bundle" > "$RUNNER_TEMP/shots/app-unit-tests.json"
+            xcrun xcresulttool get test-results summary --path "$bundle" \
+              | jq -r '"AkisTests: \(.result) (\(.passedTests) passed, \(.failedTests) failed)"'
+            jq -r '.. | objects | select(.nodeType? == "Test Case" and .result != "Passed") | "\(.result)\t\(.name)"' \
+              "$RUNNER_TEMP/shots/app-unit-tests.json"
+          fi
+          exit $status
+
+      - name: UI tests in light and dark appearance
+        id: ui
+        continue-on-error: true
         working-directory: ios
         env:
           TESTS: ${{ inputs.tests }}
@@ -91,24 +122,23 @@ jobs:
           for appearance in light dark; do
             xcrun simctl ui "$SIMULATOR_UDID" appearance "$appearance"
             xcrun simctl uninstall "$SIMULATOR_UDID" com.akis.navigation || true
-            xcodebuild test-without-building -quiet -project Akis.xcodeproj -scheme Akis -destination "$SIMULATOR" \
-              -derivedDataPath "$RUNNER_TEMP/dd" -resultBundlePath "$RUNNER_TEMP/$appearance.xcresult" "${only[@]}" \
-              > /dev/null 2>&1 || status=1
             bundle="$RUNNER_TEMP/$appearance.xcresult"
+            xcodebuild test-without-building -quiet -project Akis.xcodeproj -scheme Akis -destination "$SIMULATOR" \
+              -derivedDataPath "$RUNNER_TEMP/dd" -resultBundlePath "$bundle" "${only[@]}" \
+              > "$RUNNER_TEMP/shots/ui-$appearance.log" 2>&1 || status=1
             [ -d "$bundle" ] || continue
-            xcrun xcresulttool get test-results tests --path "$bundle" \
-              | jq -r --arg a "$appearance" '.. | objects | select(.nodeType? == "Test Case") | "\($a)\t\(.result)\t\(.name)"'
             out="$RUNNER_TEMP/shots/$appearance"
             mkdir -p "$out"
+            xcrun xcresulttool get test-results tests --path "$bundle" > "$out/tests.json"
+            jq -r --arg a "$appearance" '.. | objects | select(.nodeType? == "Test Case") | "\($a)\t\(.result)\t\(.name)"' "$out/tests.json"
             xcrun xcresulttool export attachments --path "$bundle" --output-path "$out" > /dev/null
             jq -r '.[].attachments[] | "\(.exportedFileName)\t\(.suggestedHumanReadableName)"' "$out/manifest.json" \
               | while IFS="$(printf '\t')" read -r file name; do mv "$out/$file" "$out/$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"; done
             rm -f "$out/manifest.json"
           done
-          ls -R "$RUNNER_TEMP/shots" | grep -c png || true
           exit $status
 
-      - name: Encrypt the screenshots
+      - name: Encrypt the results
         if: always()
         env:
           SHOTS_KEY: ${{ secrets.SHOTS_KEY }}
@@ -125,3 +155,12 @@ jobs:
           path: ${{ runner.temp }}/shots.enc
           retention-days: 1
           if-no-files-found: ignore
+
+      - name: Result
+        if: steps.unit.outcome != 'success' || steps.ui.outcome != 'success'
+        env:
+          UNIT: ${{ steps.unit.outcome }}
+          UI: ${{ steps.ui.outcome }}
+        run: |
+          echo "unit tests: $UNIT, UI tests: $UI"
+          exit 1
