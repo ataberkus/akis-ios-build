@@ -1,0 +1,127 @@
+# Runs the Akış UI tests from the private ataberkus/TrafficApp (read-only deploy key) on the simulator, in light and
+# dark appearance, and keeps their screenshots for design review. This repo is public: the steps print no source, and
+# the screenshots are uploaded only encrypted (AES-256, key in the SHOTS_KEY secret) for one day.
+#   gh workflow run ui-shots.yml -R ataberkus/akis-ios-build -f ref=<branch or full commit of TrafficApp>
+#   openssl enc -d -aes-256-cbc -pbkdf2 -in shots.enc -out shots.zip -pass file:<key file>
+name: UI screenshots
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: TrafficApp branch, tag or full commit
+        required: true
+        default: master
+      tests:
+        description: Space-separated -only-testing targets
+        required: true
+        default: AkisUITests/NavigationUITests/testPreviewStartDriveMoveMapRecentreAndEnd AkisUITests/MapUITests/testForecastHorizonsAndRoadInfo
+
+concurrency:
+  group: ui-shots
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  shots:
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      XCODEGEN_VERSION: 2.46.0
+      XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+      AKIS_API_URL: https://2.31.13.235:7443
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ataberkus/TrafficApp
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.TRAFFICAPP_DEPLOY_KEY }}
+          persist-credentials: false
+
+      - name: Commit
+        run: git log -1 --format='%h %s'
+
+      - name: Install XcodeGen
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/xcodegen.zip" "https://github.com/yonaskolb/XcodeGen/releases/download/$XCODEGEN_VERSION/xcodegen.zip"
+          echo "$XCODEGEN_SHA256  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP/xcodegen"
+          echo "$RUNNER_TEMP/xcodegen/xcodegen/bin" >> "$GITHUB_PATH"
+
+      - name: Generate the Xcode project
+        working-directory: ios
+        run: xcodegen generate --quiet
+
+      - name: Pick and boot the simulator
+        # iPhone 17 Pro on the newest iOS runtime; CoreSimulator can list no devices for a while after the runner starts.
+        run: |
+          for attempt in $(seq 1 18); do
+            udid="$(xcrun simctl list devices available -j | jq -r '
+              [.devices | to_entries[] | select(.key | startswith("com.apple.CoreSimulator.SimRuntime.iOS-"))
+               | .key as $runtime | .value[] | select(.name == "iPhone 17 Pro")
+               | {udid, version: ($runtime | ltrimstr("com.apple.CoreSimulator.SimRuntime.iOS-") | split("-") | map(tonumber))}]
+              | sort_by(.version) | reverse | first | .udid // empty')"
+            [ -n "$udid" ] && break
+            sleep 10
+          done
+          [ -n "$udid" ] || { xcrun simctl list runtimes; exit 1; }
+          xcrun simctl boot "$udid" 2> /dev/null || true
+          xcrun simctl bootstatus "$udid" -b > /dev/null
+          echo "SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
+          echo "SIMULATOR=platform=iOS Simulator,id=$udid" >> "$GITHUB_ENV"
+
+      - name: Build for testing
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild build-for-testing -quiet -project Akis.xcodeproj -scheme Akis -destination "$SIMULATOR" \
+            -derivedDataPath "$RUNNER_TEMP/dd" AKIS_API_URL="$AKIS_API_URL" 2>&1 | grep -E "error:|BUILD" || true
+          [ -d "$RUNNER_TEMP/dd/Build/Products/Debug-iphonesimulator/Akis.app" ]
+
+      - name: Test in light and dark appearance
+        working-directory: ios
+        env:
+          TESTS: ${{ inputs.tests }}
+        run: |
+          only=()
+          for t in $TESTS; do only+=("-only-testing:$t"); done
+          status=0
+          for appearance in light dark; do
+            xcrun simctl ui "$SIMULATOR_UDID" appearance "$appearance"
+            xcrun simctl uninstall "$SIMULATOR_UDID" com.akis.navigation || true
+            xcodebuild test-without-building -quiet -project Akis.xcodeproj -scheme Akis -destination "$SIMULATOR" \
+              -derivedDataPath "$RUNNER_TEMP/dd" -resultBundlePath "$RUNNER_TEMP/$appearance.xcresult" "${only[@]}" \
+              > /dev/null 2>&1 || status=1
+            bundle="$RUNNER_TEMP/$appearance.xcresult"
+            [ -d "$bundle" ] || continue
+            xcrun xcresulttool get test-results tests --path "$bundle" \
+              | jq -r --arg a "$appearance" '.. | objects | select(.nodeType? == "Test Case") | "\($a)\t\(.result)\t\(.name)"'
+            out="$RUNNER_TEMP/shots/$appearance"
+            mkdir -p "$out"
+            xcrun xcresulttool export attachments --path "$bundle" --output-path "$out" > /dev/null
+            jq -r '.[].attachments[] | "\(.exportedFileName)\t\(.suggestedHumanReadableName)"' "$out/manifest.json" \
+              | while IFS="$(printf '\t')" read -r file name; do mv "$out/$file" "$out/$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"; done
+            rm -f "$out/manifest.json"
+          done
+          ls -R "$RUNNER_TEMP/shots" | grep -c png || true
+          exit $status
+
+      - name: Encrypt the screenshots
+        if: always()
+        env:
+          SHOTS_KEY: ${{ secrets.SHOTS_KEY }}
+        run: |
+          [ -d "$RUNNER_TEMP/shots" ] || exit 0
+          (cd "$RUNNER_TEMP" && zip -qr shots.zip shots)
+          openssl enc -aes-256-cbc -pbkdf2 -salt -in "$RUNNER_TEMP/shots.zip" -out "$RUNNER_TEMP/shots.enc" -pass env:SHOTS_KEY
+          rm "$RUNNER_TEMP/shots.zip"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: shots
+          path: ${{ runner.temp }}/shots.enc
+          retention-days: 1
+          if-no-files-found: ignore
