@@ -89,6 +89,9 @@ jobs:
         id: unit
         continue-on-error: true
         working-directory: ios
+        env:
+          # Reaches the test process as AKIS_LIVE_API: checks production under App Transport Security, as ios.yml does.
+          TEST_RUNNER_AKIS_LIVE_API: ${{ env.AKIS_API_URL }}
         run: |
           status=0
           if swift test --package-path AkisCore > "$RUNNER_TEMP/shots/akiscore-tests.log" 2>&1; then
