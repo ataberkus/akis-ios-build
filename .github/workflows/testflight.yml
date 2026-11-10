@@ -53,12 +53,13 @@ jobs:
       - name: Test AkisCore
         run: swift test --quiet --package-path ios/AkisCore 2>&1 | tail -3
 
-      - name: Install the signing certificate and profile
+      - name: Install the signing certificate and profiles
         id: install
         env:
           IOS_DIST_CERT_P12: ${{ secrets.IOS_DIST_CERT_P12 }}
           IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
           IOS_PROVISIONING_PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+          IOS_WIDGETS_PROVISIONING_PROFILE: ${{ secrets.IOS_WIDGETS_PROVISIONING_PROFILE }}
         run: |
           keychain="$RUNNER_TEMP/signing.keychain-db"
           password="$(openssl rand -hex 24)"
@@ -71,18 +72,31 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" > /dev/null
           security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
 
-          profile="$RUNNER_TEMP/akis.mobileprovision"
-          printf '%s' "$IOS_PROVISIONING_PROFILE" | base64 --decode > "$profile"
-          security cms -D -i "$profile" > "$RUNNER_TEMP/profile.plist"
-          uuid="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$RUNNER_TEMP/profile.plist")"
-          name="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$RUNNER_TEMP/profile.plist")"
-          for dir in "$HOME/Library/MobileDevice/Provisioning Profiles" "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"; do
-            mkdir -p "$dir"
-            cp "$profile" "$dir/$uuid.mobileprovision"
-          done
+          # Decodes the base64 profile $1, installs it where Xcode looks and leaves its decoded plist at $RUNNER_TEMP/$2.plist.
+          install_profile() {
+            local profile="$RUNNER_TEMP/$2.mobileprovision" uuid
+            printf '%s' "$1" | base64 --decode > "$profile"
+            security cms -D -i "$profile" > "$RUNNER_TEMP/$2.plist"
+            uuid="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$RUNNER_TEMP/$2.plist")"
+            for dir in "$HOME/Library/MobileDevice/Provisioning Profiles" "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"; do
+              mkdir -p "$dir"
+              cp "$profile" "$dir/$uuid.mobileprovision"
+            done
+          }
+          # The app's profile, and the Live Activity extension's (com.akis.navigation.widgets).
+          install_profile "$IOS_PROVISIONING_PROFILE" akis
+          install_profile "$IOS_WIDGETS_PROVISIONING_PROFILE" widgets
+          widgets_app_id="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$RUNNER_TEMP/widgets.plist")"
+          case "$widgets_app_id" in
+            *.com.akis.navigation.widgets) ;;
+            *) echo "::error::IOS_WIDGETS_PROVISIONING_PROFILE is for $widgets_app_id, not com.akis.navigation.widgets."; exit 1 ;;
+          esac
+          name="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$RUNNER_TEMP/akis.plist")"
+          widgets_name="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$RUNNER_TEMP/widgets.plist")"
           echo "keychain=$keychain" >> "$GITHUB_OUTPUT"
           echo "profile_name=$name" >> "$GITHUB_OUTPUT"
-          if [ "$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.carplay-maps' "$RUNNER_TEMP/profile.plist" 2> /dev/null)" = "true" ]; then
+          echo "widgets_profile_name=$widgets_name" >> "$GITHUB_OUTPUT"
+          if [ "$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.carplay-maps' "$RUNNER_TEMP/akis.plist" 2> /dev/null)" = "true" ]; then
             echo "carplay=YES" >> "$GITHUB_OUTPUT"
           else
             echo "::warning::The provisioning profile has no CarPlay navigation entitlement: archiving without CarPlay."
@@ -94,6 +108,7 @@ jobs:
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           PROFILE_NAME: ${{ steps.install.outputs.profile_name }}
+          WIDGETS_PROFILE_NAME: ${{ steps.install.outputs.widgets_profile_name }}
           KEYCHAIN: ${{ steps.install.outputs.keychain }}
           AKIS_CARPLAY: ${{ steps.install.outputs.carplay }}
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
@@ -106,8 +121,8 @@ jobs:
           xcodebuild archive -quiet -project Akis.xcodeproj -scheme Akis -configuration Release \
             -destination generic/platform=iOS -archivePath "$RUNNER_TEMP/Akis.xcarchive" \
             CURRENT_PROJECT_VERSION="$build_number" AKIS_API_URL="$AKIS_API_URL" TOMTOM_API_KEY= \
-            AKIS_TEAM_ID="$APPLE_TEAM_ID" AKIS_PROFILE_NAME="$PROFILE_NAME" AKIS_CARPLAY="$AKIS_CARPLAY" \
-            OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN"
+            AKIS_TEAM_ID="$APPLE_TEAM_ID" AKIS_PROFILE_NAME="$PROFILE_NAME" AKIS_WIDGETS_PROFILE_NAME="$WIDGETS_PROFILE_NAME" \
+            AKIS_CARPLAY="$AKIS_CARPLAY" OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN"
           echo "Archived build $build_number"
 
       - name: Upload to TestFlight
@@ -117,6 +132,7 @@ jobs:
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
           PROFILE_NAME: ${{ steps.install.outputs.profile_name }}
+          WIDGETS_PROFILE_NAME: ${{ steps.install.outputs.widgets_profile_name }}
         run: |
           key="$RUNNER_TEMP/AuthKey_$ASC_KEY_ID.p8"
           printf '%s\n' "$ASC_KEY_P8" > "$key"
@@ -131,7 +147,10 @@ jobs:
             <key>signingStyle</key><string>manual</string>
             <key>signingCertificate</key><string>Apple Distribution</string>
             <key>provisioningProfiles</key>
-            <dict><key>com.akis.navigation</key><string>$PROFILE_NAME</string></dict>
+            <dict>
+              <key>com.akis.navigation</key><string>$PROFILE_NAME</string>
+              <key>com.akis.navigation.widgets</key><string>$WIDGETS_PROFILE_NAME</string>
+            </dict>
             <key>testFlightInternalTestingOnly</key><true/>
             <key>uploadSymbols</key><true/>
           </dict>
