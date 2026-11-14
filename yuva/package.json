@@ -1,0 +1,14 @@
+{
+  "name": "yuva-mobile",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Yuva for iOS: a thin Capacitor shell that opens https://yuva.chat",
+  "scripts": {
+    "sync": "cap sync ios"
+  },
+  "dependencies": {
+    "@capacitor/cli": "8.6.2",
+    "@capacitor/core": "8.6.2",
+    "@capacitor/ios": "8.6.2"
+  }
+}

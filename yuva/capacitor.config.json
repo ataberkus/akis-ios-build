@@ -1,0 +1,16 @@
+{
+  "appId": "chat.yuva.app",
+  "appName": "Yuva",
+  "webDir": "www",
+  "server": {
+    "url": "https://yuva.chat",
+    "errorPath": "offline.html"
+  },
+  "ios": {
+    "contentInset": "never",
+    "backgroundColor": "#131211",
+    "allowsLinkPreview": false,
+    "limitsNavigationsToAppBoundDomains": false
+  },
+  "appendUserAgent": "YuvaApp/iOS"
+}

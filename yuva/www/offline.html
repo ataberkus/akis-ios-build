@@ -1,0 +1,51 @@
+<!doctype html>
+<!-- Shown by Capacitor (server.errorPath) when https://yuva.chat cannot be loaded; retries as the desktop offline page.
+-->
+<html lang="tr">
+  <head>
+    <meta charset="utf-8" />
+    <title>Yuva</title>
+    <style>
+      :root {
+        --bg: #131211; --fg: #ede9e4; --muted: #aaa49d; --accent: #e4724b; --accent-fg: #1c0d07;
+        color-scheme: dark;
+      }
+      @media (prefers-color-scheme: light) {
+        :root { --bg: #f1eee9; --fg: #1f1b17; --muted: #59524b; --accent: #c85a32; --accent-fg: #fffaf5; color-scheme: light; }
+      }
+      html, body { height: 100%; margin: 0; }
+      body { display: grid; place-items: center; background: var(--bg); color: var(--fg); font-family: system-ui, sans-serif; }
+      main { text-align: center; max-width: 360px; padding: 24px; }
+      main[hidden] { display: none; }
+      h1 { font-size: 22px; font-weight: 600; margin: 0 0 8px; }
+      p { color: var(--muted); margin: 0 0 24px; line-height: 1.5; }
+      button {
+        background: var(--accent); color: var(--accent-fg); border: 0; border-radius: 10px;
+        padding: 10px 22px; font-size: 15px; font-weight: 600; cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <main id="offline" hidden>
+      <h1>Yuva'ya bağlanılamadı</h1>
+      <p>İnternet bağlantını kontrol et. Bağlantı gelince otomatik olarak tekrar deneyeceğiz.</p>
+      <button id="retry">Tekrar dene</button>
+    </main>
+    <script>
+      const target = "https://yuva.chat";
+      const offline = document.getElementById("offline");
+      // Ask first (an unreachable site fails at once), then go: a slow site keeps loading behind this page.
+      const go = () =>
+        fetch(target, { mode: "no-cors", cache: "no-store" }).then(
+          () => location.replace(target),
+          () => (offline.hidden = false),
+        );
+      // A load that fails after the probe leaves this page up: say so then too.
+      setTimeout(() => (offline.hidden = false), 10000);
+      document.getElementById("retry").addEventListener("click", go);
+      window.addEventListener("online", go);
+      setInterval(() => { if (navigator.onLine && !offline.hidden) go(); }, 15000);
+      go();
+    </script>
+  </body>
+</html>
