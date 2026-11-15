@@ -10,7 +10,12 @@
     "contentInset": "never",
     "backgroundColor": "#131211",
     "allowsLinkPreview": false,
-    "limitsNavigationsToAppBoundDomains": false
+    "limitsNavigationsToAppBoundDomains": false,
+    "appendUserAgent": "YuvaApp/iOS"
   },
-  "appendUserAgent": "YuvaApp/iOS"
+  "android": {
+    "appendUserAgent": "YuvaApp/Android",
+    "backgroundColor": "#131211",
+    "allowMixedContent": false
+  }
 }
