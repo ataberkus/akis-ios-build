@@ -9,10 +9,13 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         // Voice rooms: record and play together, out of the speaker unless headphones are in, and keep going in the
-        // background (UIBackgroundModes: audio in Info.plist). WebKit's WebRTC uses this session.
+        // background (UIBackgroundModes: audio in Info.plist). Mixable: the web view's WebRTC runs in WebKit's own
+        // process with its own session, and a CallKit call activating this one must not interrupt it (build 3 went
+        // silent both ways when it did).
         do {
             try AVAudioSession.sharedInstance().setCategory(
-                .playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothA2DP, .allowAirPlay])
+                .playAndRecord, mode: .default,
+                options: [.defaultToSpeaker, .allowBluetoothA2DP, .allowAirPlay, .mixWithOthers])
         } catch {
             NSLog("[yuva] audio session: \(error)")
         }
