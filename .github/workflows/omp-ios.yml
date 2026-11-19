@@ -34,6 +34,8 @@ jobs:
       ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
       ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      XCODEGEN_VERSION: 2.46.0
+      XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
     defaults:
       run:
         shell: bash
@@ -47,11 +49,19 @@ jobs:
           ref: ${{ inputs.ref }}
           path: src
           persist-credentials: false
+      - name: Install XcodeGen
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/xcodegen.zip" "https://github.com/yonaskolb/XcodeGen/releases/download/$XCODEGEN_VERSION/xcodegen.zip"
+          echo "$XCODEGEN_SHA256  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP/xcodegen"
+          echo "$RUNNER_TEMP/xcodegen/xcodegen/bin" >> "$GITHUB_PATH"
       - name: Source
         working-directory: src/ios
+        # The Xcode project is generated from ios/project.yml.
         run: |
           git log -1 --format='%h %s'
-          version=$(sed -n 's/^[[:space:]]*MARKETING_VERSION = \(.*\);$/\1/p' OMPCompanion.xcodeproj/project.pbxproj | sort -u)
+          xcodegen generate --quiet
+          version=$(sed -n 's/^[[:space:]]*MARKETING_VERSION = \(.*\);$/\1/p' OMPCompanion.xcodeproj/project.pbxproj | tr -d '"' | sort -u)
           [ "$(printf '%s\n' "$version" | wc -l)" -eq 1 ] || { echo "::error::Debug and Release disagree on MARKETING_VERSION: $version"; exit 1; }
           echo "OMP Control $version"
           echo "VERSION=$version" >> "$GITHUB_ENV"
@@ -103,8 +113,8 @@ jobs:
         # package (OMPCompanionKit) too, which takes no profile.
         run: |
           set -o pipefail
-          perl -0pi -e 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g;
-            s/(PRODUCT_BUNDLE_IDENTIFIER = dev\.omp\.companion;)/$1\n\t\t\t\tDEVELOPMENT_TEAM = $ENV{APPLE_TEAM_ID};\n\t\t\t\tPROVISIONING_PROFILE_SPECIFIER = "$ENV{PROFILE_NAME}";\n\t\t\t\t"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "Apple Distribution";/g' \
+          perl -0pi -e 's/CODE_SIGN_STYLE = Automatic;\n//g;
+            s/(PRODUCT_BUNDLE_IDENTIFIER = dev\.omp\.companion;)/$1\n\t\t\t\tCODE_SIGN_STYLE = Manual;\n\t\t\t\tDEVELOPMENT_TEAM = $ENV{APPLE_TEAM_ID};\n\t\t\t\tPROVISIONING_PROFILE_SPECIFIER = "$ENV{PROFILE_NAME}";\n\t\t\t\t"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "Apple Distribution";/g' \
             OMPCompanion.xcodeproj/project.pbxproj
           xcodebuild archive -quiet -project OMPCompanion.xcodeproj -scheme OMPCompanion -configuration Release \
             -destination 'generic/platform=iOS' -archivePath "$RUNNER_TEMP/OMPCompanion.xcarchive" \
