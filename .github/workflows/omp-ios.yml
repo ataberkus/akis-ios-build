@@ -56,6 +56,14 @@ jobs:
           echo "OMP Control $version"
           echo "VERSION=$version" >> "$GITHUB_ENV"
           xcodebuild -version
+      - name: Simulator build
+        # Compiles the app unsigned first: a source error shows here, before App Store Connect is touched.
+        working-directory: src/ios
+        run: |
+          set -o pipefail
+          xcodebuild build -quiet -project OMPCompanion.xcodeproj -scheme OMPCompanion -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/sim" \
+            CODE_SIGNING_ALLOWED=NO
       - name: Signing
         env:
           IOS_DIST_CERT_P12: ${{ secrets.IOS_DIST_CERT_P12 }}
